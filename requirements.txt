@@ -4,3 +4,4 @@ openai
 python-dotenv
 great_expectations
 openpyxl
+snowflake-connector-python
