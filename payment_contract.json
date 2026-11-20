@@ -1,7 +1,11 @@
 {
   "name": "payment_contract",
   "meta": {
-    "description": "Payment release contract. A payment row is READY only if it passes every expectation; any failure HOLDS it. hold_category is the failed rule with the lowest priority number; reason lists every failed rule, most serious first, with the values involved.",
+    "description": "Payment release contract. A payment row is READY only if it passes every expectation in its scope; any failure HOLDS it. hold_category is the failed rule with the lowest priority number; reason lists every failed rule, most serious first, with the values involved.",
+    "scopes": {
+      "batch": "check_payments.py: the 300-row checked table against the accounts-on-file workbook.",
+      "page": "review_page.py: one pasted email, held on what the email itself says. Each page rule's queue_code is its HOLD_REASON code in PAYMENT_INSTRUCTION_QUEUE."
+    },
     "inputs": {
       "payments": "payments_sep_nov_2026.csv (one row per email; client_id joined from the email export via email_id)",
       "accounts_on_file": "Client Settlement Accounts on File.xlsx, sheet 'Accounts On File', joined on Client ID"
@@ -11,34 +15,298 @@
   "expectations": [
     {
       "type": "expect_column_values_to_be_null",
-      "kwargs": {"column": "new_account"},
+      "kwargs": {
+        "column": "new_account"
+      },
       "meta": {
-        "rule": "bank_detail_change", "priority": 1,
+        "scope": [
+          "batch",
+          "page"
+        ],
+        "rule": "bank_detail_change",
+        "priority": 1,
+        "queue_code": "bank_detail_change",
         "hold_reason": "bank-detail change in email: old {old_account} -> new {new_account}; confirm by call-back"
       }
     },
     {
       "type": "expect_column_values_to_be_in_set",
-      "kwargs": {"column": "client_id", "value_set": "__CLIENT_IDS_ON_FILE__"},
+      "kwargs": {
+        "column": "client_id",
+        "value_set": "__CLIENT_IDS_ON_FILE__"
+      },
       "meta": {
-        "rule": "unknown_client", "priority": 2,
+        "scope": [
+          "batch"
+        ],
+        "rule": "unknown_client",
+        "priority": 2,
         "hold_reason": "client ID {client_id} not in accounts file"
       }
     },
     {
       "type": "expect_column_pair_values_to_be_equal",
-      "kwargs": {"column_A": "account_text", "column_B": "account_on_file_text", "ignore_row_if": "neither"},
+      "kwargs": {
+        "column_A": "account_text",
+        "column_B": "account_on_file_text",
+        "ignore_row_if": "neither"
+      },
       "meta": {
-        "rule": "account_mismatch", "priority": 3,
+        "scope": [
+          "batch"
+        ],
+        "rule": "account_mismatch",
+        "priority": 3,
         "hold_reason": "account {account_with_sort_code} differs from account on file {account_on_file}"
       }
     },
     {
       "type": "expect_column_pair_values_to_be_equal",
-      "kwargs": {"column_A": "currency", "column_B": "account_currency_on_file", "ignore_row_if": "neither"},
+      "kwargs": {
+        "column_A": "currency",
+        "column_B": "account_currency_on_file",
+        "ignore_row_if": "neither"
+      },
       "meta": {
-        "rule": "currency_mismatch", "priority": 4,
+        "scope": [
+          "batch"
+        ],
+        "rule": "currency_mismatch",
+        "priority": 4,
         "hold_reason": "currency {currency} differs from client's account currency {account_currency_on_file}"
+      }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "payee_name"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "missing_payee",
+        "priority": 2,
+        "queue_code": "missing_required_field",
+        "hold_reason": "payee name missing from the email"
+      }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "currency"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "missing_currency",
+        "priority": 2,
+        "queue_code": "missing_required_field",
+        "hold_reason": "currency missing from the email"
+      }
+    },
+    {
+      "type": "expect_column_values_to_be_in_set",
+      "kwargs": {
+        "column": "currency",
+        "value_set": [
+          "USD",
+          "EUR",
+          "GBP",
+          "CAD",
+          "CHF",
+          "JPY"
+        ]
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "unsupported_currency",
+        "priority": 2,
+        "queue_code": "missing_required_field",
+        "hold_reason": "currency {currency} is not one of USD, EUR, GBP, CAD, CHF, JPY"
+      }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "account_with_sort_code"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "missing_account",
+        "priority": 2,
+        "queue_code": "missing_required_field",
+        "hold_reason": "account number missing from the email"
+      }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "amount"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "missing_amount",
+        "priority": 3,
+        "queue_code": "invalid_amount",
+        "hold_reason": "amount missing from the email; never taken from 'same as last month'"
+      }
+    },
+    {
+      "type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "amount",
+        "min_value": 0,
+        "strict_min": true
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "amount_not_positive",
+        "priority": 3,
+        "queue_code": "invalid_amount",
+        "hold_reason": "amount {amount} is not a positive number"
+      }
+    },
+    {
+      "type": "expect_column_values_to_match_regex",
+      "kwargs": {
+        "column": "amount_text",
+        "regex": "^\\d+(\\.\\d{1,2})?$"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "amount_decimals",
+        "priority": 3,
+        "queue_code": "invalid_amount",
+        "hold_reason": "amount {amount} has more than two decimal places"
+      }
+    },
+    {
+      "type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "payment_date"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "missing_date",
+        "priority": 4,
+        "queue_code": "invalid_payment_date",
+        "hold_reason": "payment date missing or unreadable ({value_date})"
+      }
+    },
+    {
+      "type": "expect_column_values_to_be_between",
+      "kwargs": {
+        "column": "payment_date",
+        "min_value": "2026-09-01",
+        "max_value": "2026-12-18"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "date_out_of_range",
+        "priority": 4,
+        "queue_code": "invalid_payment_date",
+        "hold_reason": "payment date {payment_date} is outside 2026-09-01 to 2026-12-18",
+        "date_bounds": true
+      }
+    },
+    {
+      "type": "expect_column_pair_values_a_to_be_greater_than_b",
+      "kwargs": {
+        "column_A": "payment_date",
+        "column_B": "received_date",
+        "or_equal": true,
+        "ignore_row_if": "either_value_is_missing"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "date_in_past",
+        "priority": 4,
+        "queue_code": "invalid_payment_date",
+        "hold_reason": "payment date {payment_date} is before the email was received ({received_date})"
+      }
+    },
+    {
+      "type": "expect_column_value_lengths_to_be_between",
+      "kwargs": {
+        "column": "account_core",
+        "min_value": 8
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "partial_account",
+        "priority": 5,
+        "queue_code": "invalid_account_number",
+        "hold_reason": "account '{account_with_sort_code}' is partial (fewer than 8 characters)"
+      }
+    },
+    {
+      "type": "expect_column_values_to_not_match_regex",
+      "kwargs": {
+        "column": "account_with_sort_code",
+        "regex": "(?i)(ending|ends in|last \\d|\\*|x{3,}|\\u2026|\\.\\.\\.)"
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "masked_account",
+        "priority": 5,
+        "queue_code": "invalid_account_number",
+        "hold_reason": "account '{account_with_sort_code}' is masked or truncated"
+      }
+    },
+    {
+      "type": "expect_column_value_lengths_to_be_between",
+      "kwargs": {
+        "column": "account_with_sort_code",
+        "max_value": 34
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "account_too_long",
+        "priority": 5,
+        "queue_code": "invalid_account_number",
+        "hold_reason": "account '{account_with_sort_code}' is longer than 34 characters"
+      }
+    },
+    {
+      "type": "expect_column_values_to_be_in_set",
+      "kwargs": {
+        "column": "extraction_status",
+        "value_set": [
+          "ok"
+        ]
+      },
+      "meta": {
+        "scope": [
+          "page"
+        ],
+        "rule": "unusable_output",
+        "priority": 6,
+        "queue_code": "unusable_model_output",
+        "hold_reason": "the model's output could not be used ({extraction_problems})"
       }
     }
   ]

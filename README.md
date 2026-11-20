@@ -67,6 +67,46 @@ Run `.venv/bin/python load_queue.py`, or add `--dry-run` to validate without con
 
 **Result:** 300 rows inserted in run `load-20261120T230359Z-143eb215`, all 300 held and 0 ready. `SELECT COUNT(*)` on the queue returns 300. A second run stopped with "300 EMAIL_ID(s) already in the queue; nothing inserted", so the queue was not doubled.
 
+## Payment review page
+
+`review_page.py` reviews one pasted email at a time:
+
+```
+.venv/bin/streamlit run review_page.py
+```
+
+It opens at http://localhost:8501. Paste the email ID, client ID, received time, sender, subject and body, or pick a holdout email in the sidebar, then click **Check and queue**. The page shows:
+
+1. **The payment details:** payee, amount, currency, the payment date as written and as read, the account, any old and new account, the reference and the sender.
+2. **READY or HELD** in large text, with every reason in plain words and the queue hold-reason code.
+3. **The queue row,** read live from `PAYMENT_INSTRUCTION_QUEUE` with a `SELECT` by email ID after the insert. If the email is already queued, nothing is inserted and the existing row is shown. If Snowflake can't be reached, the page says so instead of showing a row.
+
+The logic is in `review_email.py`, which reuses the existing code instead of copying it: `extract_payments.extract_single` (same prompt, model, Pydantic model and text check), the same Great Expectations suite in `payment_contract.json`, and the loader's own validate, insert and read-back steps. Each rule in the suite is tagged `batch`, `page` or both.
+
+The page holds a payment when the email itself gives a reason. Several rules can fail at once; the most serious one in this order becomes the queue's hold reason:
+
+| Rule | Queue HOLD_REASON |
+|---|---|
+| Bank-detail change: the email asks to start paying a different account (old and new shown) | `bank_detail_change` |
+| Payee, currency or account missing, or a currency outside USD/EUR/GBP/CAD/CHF/JPY | `missing_required_field` |
+| Amount missing, not positive, or with more than 2 decimals | `invalid_amount` |
+| Payment date missing or unreadable, before the email was received, or outside 2026-09-01 to 2026-12-18 | `invalid_payment_date` |
+| Account partial ("ending 0371"), masked ("****"), under 8 characters or over 34 | `invalid_account_number` |
+| Model output unusable | `unusable_model_output` |
+
+Unlike the batch run, the page doesn't hold a payment just because its account differs from the accounts workbook. That matches the holdout answers. A date written without a year takes the year the email was received.
+
+**Test results (holdout emails):**
+
+| Email | Result | Queue row |
+|---|---|---|
+| EM-00311 | HELD, bank-detail change 5503918826 → 9921043376 | held / bank_detail_change |
+| EM-00304 | READY to 7725480193 (the quoted account is described as closed history) | ready / none |
+| EM-00353 | READY to 5503918826 | ready / none |
+| EM-00305 | HELD, bank-detail change to DE12500105170648489890, payee missing | held / bank_detail_change |
+
+The queue now has 304 rows: the 300 from the batch load (run IDs starting `load-`) and these 4 (run IDs starting `page-`). Running the page again on EM-00311 showed the existing row and inserted nothing.
+
 ## Claude Code prompts used
 
 ### Payment contract (`payment_contract.json`, `check_payments.py`)
@@ -88,3 +128,34 @@ Follow-up changes from review: one row per email (extra payments moved to `addit
 > Hand back: the script. When it runs, it prints the total rows inserted plus the held and ready counts.
 
 Follow-up from running it: the script also refuses to insert any email already in the queue, because the primary key isn't enforced and the loader can't delete duplicates.
+
+### Payment review page (`review_page.py`, `review_email.py`)
+
+> Build a small payment review page for a single pasted client email, reusing what is already in this repo. Do not make new copies of the extractor, the contract or the loader; import and call the existing code.
+>
+> Parts to build on:
+> - extract_payments.py: send the pasted email (sender, subject, body, including any forwarded thread) to the same OpenRouter model, with the same prompt, the same Pydantic Payment model and the same check that blanks any value not found in the email text.
+> - payment_contract.json, applied with check_payments.py: run the same Great Expectations suite on the extracted row and add the new hold rules below as expectations in that same suite.
+> - load_queue.py: map the row to the PAYMENT_INSTRUCTION_QUEUE columns and validate it exactly as the loader does, then insert it as PAYMENTS_OPS_LOADER (INSERT and SELECT only). If the EMAIL_ID is already in the queue, insert nothing and show the existing row.
+> - Credentials: OPENROUTER_API_KEY, OPENROUTER_MODEL, SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER and SNOWFLAKE_PASSWORD come only from .env. Never put them in code or in the page.
+>
+> Hold rules. The page must mark the payment HELD, with a reason, if any of these is true:
+> 1. Bank-detail change: the newest message, or a forwarded/quoted thread, says an old account is replaced or closed, or the newest message asks to pay a different account than the quoted message. Show both the old and the new account. Paying the newest instruction's account is never automatic; it waits for a call-back.
+> 2. Missing amount: no amount, or an amount that isn't a positive number with two decimals.
+> 3. Past or invalid date: the payment date is missing, can't be read, is before the email's received date, or is outside 2026-09-01 to 2026-12-18.
+> 4. Partial account: the account is masked, truncated or incomplete (for example "ending 4471", "****8893" or a sort code with no account number), or longer than 34 characters.
+> 5. Any other missing required field (payee or currency), a currency not in USD, EUR, GBP, CAD, CHF or JPY, or model output that can't be parsed.
+>
+> Map each rule to the queue's HOLD_REASON codes: bank_detail_change, missing_required_field, invalid_amount, invalid_payment_date, invalid_account_number or unusable_model_output. If several rules fail, use the most serious one in that order and list all of them in the page's reason text. Everything else is READY with HOLD_REASON none. Never guess a missing value; leave it blank and hold.
+>
+> What the page shows:
+> 1. The extracted payment details: payee, amount, currency, payment date, account, old and new account if any, reference and sender.
+> 2. READY or HELD in large text, with the reason in plain words and the actual values involved.
+> 3. The queue row for this email, read live from PAYMENTS_OPS.PAYMENT_QUEUE.PAYMENT_INSTRUCTION_QUEUE in Snowflake with a SELECT by EMAIL_ID after the insert, never from a CSV or from the values in memory. If Snowflake can't be reached, say so on the page instead of showing a row.
+>
+> Test it with these holdout emails and show me the result for each: EM-00311 (should be HELD, bank-detail change to 9921043376), EM-00304 (should be READY to 7725480193, because the quoted older account is closed), EM-00353 and EM-00305. Then tell me how to run the page.
+
+Follow-ups from building it:
+- **Extractor prompt:** old and new accounts are now only filled when the email asks to *start* paying a different account, not when a former, closed account is mentioned as history (EM-00304, EM-00320 and EM-00341 in the holdout). Partial accounts are copied as written, never completed.
+- **Account check:** "sort code 20-32-06 account 60218834" now passes the text check.
+- **Date bounds:** the date limits are converted to real dates when the suite loads, because Great Expectations ignores text date limits.

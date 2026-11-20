@@ -49,19 +49,31 @@ def build_frame() -> tuple[pd.DataFrame, set[str]]:
     return df, set(accounts["client_id"].dropna())
 
 
-def load_suite(client_ids: set[str]) -> gx.ExpectationSuite:
+def load_suite(client_ids: set[str] | None = None, scope: str = "batch") -> gx.ExpectationSuite:
+    """Load the contract, keeping only the expectations whose meta.scope includes `scope`.
+
+    "batch" = the checked-table run against the accounts file; "page" = the single-email
+    review page. Expectations without a scope are batch-only.
+    """
     with open(CONTRACT, encoding="utf-8") as f:
         contract = json.load(f)
+    kept = []
     for exp in contract["expectations"]:
+        if scope not in exp["meta"].get("scope", ["batch"]):
+            continue
         if exp["kwargs"].get("value_set") == "__CLIENT_IDS_ON_FILE__":
-            exp["kwargs"]["value_set"] = sorted(client_ids)
+            exp["kwargs"]["value_set"] = sorted(client_ids or [])
+        if exp["meta"].get("date_bounds"):  # JSON holds dates as text; GX needs real dates
+            for k in ("min_value", "max_value"):
+                if k in exp["kwargs"]:
+                    exp["kwargs"][k] = pd.Timestamp(exp["kwargs"][k])
+        kept.append(exp)
+    contract["expectations"] = kept
     return gx.ExpectationSuite(**contract)
 
 
-def main() -> None:
-    df, client_ids = build_frame()
-    suite = load_suite(client_ids)
-
+def run_suite(df: pd.DataFrame, suite: gx.ExpectationSuite, verbose: bool = True):
+    """Validate df (must have a row_id column). Returns {row_id: [(priority, rule, meta), ...]}."""
     context = gx.get_context(mode="ephemeral")
     batch = (
         context.data_sources.add_pandas("payments")
@@ -73,15 +85,23 @@ def main() -> None:
         suite,
         result_format={"result_format": "COMPLETE", "unexpected_index_column_names": ["row_id"]},
     )
-
-    # failed rules per row as (priority, rule, meta)
     failed: dict[int, list[tuple[int, str, dict]]] = {rid: [] for rid in df.row_id}
     for r in results.results:
         meta = r.expectation_config.meta
         n_bad = r.result.get("unexpected_count", 0)
-        print(f"{meta['rule']:<20} {'PASS' if r.success else 'FAIL'}  {n_bad} rows held")
+        if verbose:
+            print(f"{meta['rule']:<20} {'PASS' if r.success else 'FAIL'}  {n_bad} rows held")
         for item in r.result.get("unexpected_index_list") or []:
-            failed[item["row_id"]].append((meta["priority"], meta["rule"], meta))
+            entry = (meta["priority"], meta["rule"], meta)
+            if entry not in failed[item["row_id"]]:
+                failed[item["row_id"]].append(entry)
+    return failed
+
+
+def main() -> None:
+    df, client_ids = build_frame()
+    suite = load_suite(client_ids, scope="batch")
+    failed = run_suite(df, suite)
 
     rows = df.set_index("row_id")
     status, category, reason = [], [], []

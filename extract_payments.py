@@ -82,11 +82,17 @@ Rules:
 - amount: plain number only (e.g. 184250.00), no currency symbol or thousands separators.
 - currency: 3-letter code as written (GBP, EUR, USD...).
 - value_date: the date the payment should be made, as written.
-- account_with_sort_code: the account or IBAN the money should be sent to; include the
-  sort code if one is given.
-- Emails may contain a forwarded thread (after "-----Original Message-----"). Read it:
-  if it says an old account is closed/no longer used, put that in old_account and the
-  replacement in new_account. Leave both null if no change is mentioned.
+- account_with_sort_code: the account or IBAN the money should be sent to, taken from
+  the newest message; include the sort code if one is given. If only part of the account
+  is given (e.g. "ending 0371", "****8893"), copy exactly that part; never complete it.
+- Emails may contain a forwarded thread (after "-----Original Message-----"). Read it.
+  Fill old_account and new_account ONLY when this email asks us to start paying a
+  different account from the one used before (e.g. "our account has changed", "pay our
+  new account", "rather than the account in the original instruction"): old_account is
+  the account being replaced, new_account the one now requested.
+  Leave both null when the email says the account being paid is the existing, usual or
+  on-file account and only mentions a former or closed account as history or to say it
+  must not be used. Leave both null if no change is mentioned.
 - reference: the payment reference or invoice number(s) as written.
 - sender_email: the sender_email given for that email.
 Output JSON only."""
@@ -118,6 +124,12 @@ def verify(p: Payment, source: str) -> tuple[Payment, list[str]]:
             continue
         if field == "amount":
             ok = round(float(val), 2) in _numbers_in(source)
+        elif field in ("account_with_sort_code", "old_account", "new_account"):
+            # e.g. "20-32-06 60218834" from "sort code 20-32-06 account 60218834":
+            # every piece must appear in the email, in order
+            pieces = re.findall(r"[0-9A-Za-z]+", str(val))
+            pattern = ".*?".join(re.escape(_norm(p)) for p in pieces)
+            ok = bool(pieces) and re.search(pattern, src_norm) is not None
         else:
             ok = bool(_norm(str(val))) and _norm(str(val)) in src_norm
         if not ok:
@@ -176,6 +188,36 @@ def call_model(client: OpenAI, model: str, batch: pd.DataFrame) -> str:
             print(f"  error ({e}); retrying in {wait}s")
             time.sleep(wait)
     raise RuntimeError("gave up after retries")
+
+
+def extract_single(email: dict, client: OpenAI | None = None, model: str | None = None) -> dict:
+    """Extract one email with the same prompt, model, Pydantic model and verify() as the batch.
+
+    email needs: email_id, sender_email, subject, email_body.
+    Returns {"payments": [Payment, ...], "status": "ok"|"unusable_output", "problems": [...]}.
+    """
+    if client is None or model is None:
+        load_dotenv(Path(__file__).with_name(".env"))
+        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"])
+        model = os.environ["OPENROUTER_MODEL"]
+    one = pd.DataFrame([{k: email.get(k, "") or "" for k in ("email_id", "sender_email", "subject", "email_body")}])
+    source = email_block(next(one.itertuples()))
+    content = call_model(client, model, one)
+    try:
+        extraction = Extraction.model_validate(parse_json(content))
+    except (ValueError, ValidationError) as e:
+        return {"payments": [], "status": "unusable_output", "problems": [f"unparseable model output: {e}"]}
+    payments, problems = [], []
+    for p in extraction.payments:
+        p.email_id = email["email_id"]  # only one email was sent
+        p, blanked = verify(p, source)
+        if blanked:
+            problems.append("blanked unverifiable: " + "; ".join(blanked))
+        payments.append(p)
+    status = "ok" if payments else "unusable_output"
+    if not payments:
+        problems.append("model returned no payment")
+    return {"payments": payments, "status": status, "problems": problems}
 
 
 def load_cache() -> dict[str, str]:

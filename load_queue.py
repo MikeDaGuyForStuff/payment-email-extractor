@@ -128,11 +128,17 @@ def build_rows(load_run_id: str, loaded_at: datetime) -> tuple[list[dict], list[
     return rows, problems
 
 
-def validate(rows: list[dict]) -> list[str]:
-    """Check every value against the DDL column types, NOT NULL flags and comments."""
+def validate(rows: list[dict], expected_rows: int | None = EXPECTED_ROWS,
+             max_email_number: int | None = 300) -> list[str]:
+    """Check every value against the DDL column types, NOT NULL flags and comments.
+
+    The batch load expects exactly 300 rows, EM-00001..EM-00300 (the DDL comment).
+    The review page passes expected_rows=1 and max_email_number=None, so later emails
+    (e.g. the EM-003xx holdout) must still be EM-nnnnn and fit VARCHAR(8).
+    """
     problems = []
-    if len(rows) != EXPECTED_ROWS:
-        problems.append(f"expected {EXPECTED_ROWS} rows, got {len(rows)}")
+    if expected_rows is not None and len(rows) != expected_rows:
+        problems.append(f"expected {expected_rows} rows, got {len(rows)}")
 
     ids = [r["EMAIL_ID"] for r in rows]
     dupes = sorted({i for i in ids if ids.count(i) > 1})
@@ -148,8 +154,9 @@ def validate(rows: list[dict]) -> list[str]:
             if r[col] is None:
                 bad(f"{col} is NULL but NOT NULL in the DDL")
 
-        if not (isinstance(eid, str) and re.fullmatch(r"EM-\d{5}", eid) and 1 <= int(eid[3:]) <= 300):
-            bad("EMAIL_ID not in EM-00001..EM-00300")
+        if not (isinstance(eid, str) and re.fullmatch(r"EM-\d{5}", eid) and 1 <= int(eid[3:])
+                and (max_email_number is None or int(eid[3:]) <= max_email_number)):
+            bad(f"EMAIL_ID {eid!r} not in EM-00001..EM-{max_email_number or 99999:05d}")
         cid = r["CLIENT_ID"]
         if not (isinstance(cid, str) and re.fullmatch(r"CL-\d{4}", cid) and 1001 <= int(cid[3:]) <= 1030):
             bad(f"CLIENT_ID {cid!r} not in CL-1001..CL-1030")
@@ -205,6 +212,33 @@ def connect():
     )
 
 
+INSERT_SQL = f"INSERT INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({', '.join('?' for _ in COLUMNS)})"
+
+
+def already_loaded(cur, email_ids) -> list[str]:
+    """EMAIL_IDs already in the queue (the PRIMARY KEY is not enforced, so we check)."""
+    cur.execute(f"SELECT EMAIL_ID FROM {TABLE}")
+    return sorted({r[0] for r in cur.fetchall()} & set(email_ids))
+
+
+def insert_rows(conn, rows: list[dict]) -> None:
+    """INSERT rows in one transaction; roll back on any error."""
+    cur = conn.cursor()
+    try:
+        cur.executemany(INSERT_SQL, [tuple(r[c] for c in COLUMNS) for r in rows])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def fetch_queue_row(cur, email_id: str) -> dict | None:
+    """Read one row live from the queue by EMAIL_ID."""
+    cur.execute(f"SELECT {', '.join(COLUMNS)} FROM {TABLE} WHERE EMAIL_ID = ?", (email_id,))
+    row = cur.fetchone()
+    return dict(zip(COLUMNS, row)) if row else None
+
+
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
     load_run_id = f"load-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
@@ -228,19 +262,13 @@ def main() -> None:
         cur = conn.cursor()
         # PRIMARY KEY on EMAIL_ID is not enforced, and the loader can't delete,
         # so refuse to load any email that is already in the queue.
-        cur.execute(f"SELECT EMAIL_ID FROM {TABLE}")
-        already = sorted({r[0] for r in cur.fetchall()} & {r["EMAIL_ID"] for r in rows})
+        already = already_loaded(cur, [r["EMAIL_ID"] for r in rows])
         if already:
             print(f"STOPPED: {len(already)} EMAIL_ID(s) already in the queue; nothing inserted.")
             print("  first few:", already[:10])
             raise SystemExit(1)
 
-        placeholders = ", ".join("?" for _ in COLUMNS)
-        cur.executemany(
-            f"INSERT INTO {TABLE} ({', '.join(COLUMNS)}) VALUES ({placeholders})",
-            [tuple(r[c] for c in COLUMNS) for r in rows],
-        )
-        conn.commit()
+        insert_rows(conn, rows)
 
         cur.execute(
             f"SELECT DISPOSITION, COUNT(*) FROM {TABLE} WHERE LOAD_RUN_ID = ? GROUP BY DISPOSITION",
