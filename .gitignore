@@ -16,3 +16,6 @@ venv/
 
 # Extractor cache (holds raw model output with client data)
 .cache/
+
+# Office lock files
+.~lock.*#

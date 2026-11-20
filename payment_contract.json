@@ -1,0 +1,28 @@
+{
+  "name": "payment_contract",
+  "meta": {
+    "description": "Payment release contract. A payment row is READY only if it passes every expectation; any failure HOLDS it with the expectation's hold_reason.",
+    "inputs": {
+      "payments": "payments_sep_nov_2026.csv (client_id joined from the email export via email_id)",
+      "accounts_on_file": "Client Settlement Accounts on File.xlsx, sheet 'Accounts On File'"
+    },
+    "normalisation": "Account numbers are compared as text with all whitespace removed (IBAN grouping spaces). They are never converted to numbers, so leading zeros are kept. No other characters are altered."
+  },
+  "expectations": [
+    {
+      "type": "expect_column_values_to_be_in_set",
+      "kwargs": {"column": "client_id", "value_set": "__CLIENT_IDS_ON_FILE__"},
+      "meta": {"rule": "client_known", "hold_reason": "client ID not in accounts file"}
+    },
+    {
+      "type": "expect_column_pair_values_to_be_equal",
+      "kwargs": {"column_A": "account_text", "column_B": "account_on_file_text", "ignore_row_if": "neither"},
+      "meta": {"rule": "account_matches_file", "hold_reason": "account differs from account on file"}
+    },
+    {
+      "type": "expect_column_pair_values_to_be_equal",
+      "kwargs": {"column_A": "currency", "column_B": "account_currency_on_file", "ignore_row_if": "neither"},
+      "meta": {"rule": "currency_matches_file", "hold_reason": "currency differs from client's account currency"}
+    }
+  ]
+}

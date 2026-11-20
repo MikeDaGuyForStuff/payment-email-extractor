@@ -2,3 +2,5 @@ pandas
 pydantic
 openai
 python-dotenv
+great_expectations
+openpyxl
