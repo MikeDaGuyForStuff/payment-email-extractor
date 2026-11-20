@@ -7,6 +7,7 @@ key.txt
 # Client data: contains account numbers and payment details
 *.csv
 !payments_sep_nov_2026.csv
+!payments_checked.csv
 
 # Python
 __pycache__/

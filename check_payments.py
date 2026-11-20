@@ -74,25 +74,37 @@ def main() -> None:
         result_format={"result_format": "COMPLETE", "unexpected_index_column_names": ["row_id"]},
     )
 
-    reasons: dict[int, list[str]] = {rid: [] for rid in df.row_id}
+    # failed rules per row as (priority, rule, meta)
+    failed: dict[int, list[tuple[int, str, dict]]] = {rid: [] for rid in df.row_id}
     for r in results.results:
-        reason = r.expectation_config.meta["hold_reason"]
+        meta = r.expectation_config.meta
         n_bad = r.result.get("unexpected_count", 0)
-        print(f"{r.expectation_config.meta['rule']:<24} {'PASS' if r.success else 'FAIL'}  {n_bad} rows held")
+        print(f"{meta['rule']:<20} {'PASS' if r.success else 'FAIL'}  {n_bad} rows held")
         for item in r.result.get("unexpected_index_list") or []:
-            reasons[item["row_id"]].append(reason)
+            failed[item["row_id"]].append((meta["priority"], meta["rule"], meta))
 
-    df["status"] = ["HELD" if reasons[rid] else "READY" for rid in df.row_id]
-    df["reason"] = ["; ".join(reasons[rid]) if reasons[rid] else "matches account and currency on file" for rid in df.row_id]
+    rows = df.set_index("row_id")
+    status, category, reason = [], [], []
+    for rid in df.row_id:
+        fails = sorted(failed[rid], key=lambda f: f[0])
+        values = {k: ("blank" if pd.isna(v) else v) for k, v in rows.loc[rid].items()}
+        texts = [m["hold_reason"].format(**values) for _, _, m in fails]
+        if values["payment_count"] not in ("1", 1, "blank"):
+            texts.append(f"note: {int(values['payment_count']) - 1} more payment(s) in additional_payments, not checked")
+        status.append("HELD" if fails else "READY")
+        category.append(fails[0][1] if fails else "")
+        reason.append("; ".join(texts) if fails else "matches account and currency on file")
+    df["status"], df["hold_category"], df["reason"] = status, category, reason
 
-    out_cols = ["row_id", "status", "reason", "email_id", "client_id", "client_name_on_file",
+    out_cols = ["row_id", "status", "hold_category", "reason", "email_id", "client_id", "client_name_on_file",
                 "payee_name", "amount", "currency", "account_currency_on_file", "value_date",
                 "account_with_sort_code", "account_on_file", "old_account", "new_account",
+                "payment_count", "additional_payments",
                 "reference", "sender_email"]
     df[out_cols].to_csv(OUTPUT, index=False)
     print(f"\n{len(df)} rows -> {OUTPUT}")
     print(df.status.value_counts().to_string())
-    print(df.reason.value_counts().to_string())
+    print(df.hold_category.value_counts().to_string())
 
 
 if __name__ == "__main__":

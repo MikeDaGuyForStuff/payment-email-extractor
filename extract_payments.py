@@ -258,23 +258,39 @@ def main() -> None:
             if eid not in seen:
                 problems.append({"email_id": eid, "issue": "no payment extracted"})
 
-    df = pd.DataFrame(rows, columns=list(Payment.model_fields))
+    payments = pd.DataFrame(rows, columns=list(Payment.model_fields))
+
+    # One row per email: keep the first payment the email asks for; any further
+    # payments go into a flag column instead of extra rows.
+    def describe(p) -> str:
+        parts = [p.payee_name, p.currency, None if pd.isna(p.amount) else f"{p.amount:.2f}",
+                 f"to {p.account_with_sort_code}" if p.account_with_sort_code else None]
+        return " ".join(str(x) for x in parts if x is not None and not pd.isna(x))
+
+    first = payments.drop_duplicates("email_id", keep="first").set_index("email_id")
+    extra = payments[payments.duplicated("email_id", keep="first")]
+    df = emails[["email_id"]].join(first, on="email_id")  # all emails, export order
+    df["payment_count"] = df.email_id.map(payments.email_id.value_counts()).fillna(0).astype(int)
+    df["additional_payments"] = df.email_id.map(
+        extra.groupby("email_id").apply(lambda g: " | ".join(describe(p) for p in g.itertuples()))
+    )
     df.to_csv(out_path, index=False)
 
     # Shared fields (date, reference) in multi-payment emails may have been
     # copied to a payment they don't apply to; the text check can't catch that.
-    for eid, n in df.email_id.value_counts().items():
+    for eid, n in payments.email_id.value_counts().items():
         if n > 1:
-            problems.append({"email_id": eid, "issue": f"{n} payments in one email: check date/reference apply to each"})
+            problems.append({"email_id": eid, "issue": f"{n} payments in one email: extra ones are in additional_payments, not checked as rows"})
     # Same account for different payees is a common payment-fraud signal.
-    for acct, payees in df.groupby("account_with_sort_code").payee_name.unique().items():
+    for acct, payees in payments.groupby("account_with_sort_code").payee_name.unique().items():
         if len(payees) > 1:
-            for eid in df[df.account_with_sort_code == acct].email_id.unique():
+            for eid in payments[payments.account_with_sort_code == acct].email_id.unique():
                 problems.append({"email_id": eid, "issue": f"account {acct} used by several payees: {', '.join(payees)}"})
     pd.DataFrame(problems, columns=["email_id", "issue"]).to_csv(
         Path(out_path).with_name(Path(out_path).stem + "_review.csv"), index=False
     )
-    print(f"\n{len(df)} payment rows from {df.email_id.nunique()} emails -> {out_path}")
+    print(f"\n{len(df)} rows (one per email) -> {out_path}; "
+          f"{df.additional_payments.notna().sum()} emails have extra payments in additional_payments")
     print(f"{len(problems)} items flagged for review")
     print(df.notna().sum().to_string())
 
