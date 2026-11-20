@@ -6,6 +6,7 @@ key.txt
 
 # Client data: contains account numbers and payment details
 *.csv
+!payments_sep_nov_2026.csv
 
 # Python
 __pycache__/
@@ -15,4 +16,3 @@ venv/
 
 # Extractor cache (holds raw model output with client data)
 .cache/
-!payments_sep_nov_2026.csv
