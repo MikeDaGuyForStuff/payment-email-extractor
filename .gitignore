@@ -15,3 +15,4 @@ venv/
 
 # Extractor cache (holds raw model output with client data)
 .cache/
+!payments_sep_nov_2026.csv
